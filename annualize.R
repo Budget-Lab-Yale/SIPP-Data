@@ -19,8 +19,21 @@ getmode <- function(v) {
   uniqv[which.max(tabulate(match(v, uniqv)))]
 }
 
-build_annual_sipp = function(year, write = F, out = T) {
-  
+
+build_annual_sipp = function(year) {
+  #----------------------------------------------------------------------------
+  # Constructs an annual panel of SIPP data for the given year. 
+  # 
+  # Parameters:
+  #   - year  (int)  : SIPP survey year to annualize. Lagged 1 year from time.
+  #
+  # Returns: df(). Retruns the annual panel.
+  #          Values include: Age, marital status, number of dependents, number of young dependents,
+  #                          whether the person is claimed as dependent, total tips,
+  #                          total wage income, total tips from wage income, 
+  #                          total self employment income, total tips from self employment
+  #                          industries worked, tips from self employment and wages by industry
+  #----------------------------------------------------------------------------  
   pu = file.path('/gpfs/gibbs/project/sarin/shared/raw_data/SIPP', year, paste0('pu',year,'.csv')) %>%
     fread(., sep = '|', select = c(
       # Select survey variables
@@ -45,6 +58,7 @@ build_annual_sipp = function(year, write = F, out = T) {
   data = 
     pu %>%
     rename(
+      # Simplify Names
       INC  = TPTOTINC,
       AJB1 = AJB1_TXAMT,
       AJB2 = AJB2_TXAMT,
@@ -59,9 +73,11 @@ build_annual_sipp = function(year, write = F, out = T) {
       i_flag = rowSums(ifelse(select(., contains("AJB")) > 1, 1, 0)),
       i_flag = i_flag > 0,
       
+      # Recode to binary
       across(contains('CLWRK'), ~.x > 6),
       across(contains('TYPPAY'), ~ .x %% 2),
       
+      # Set flags for if an occupation's industry reports tips
       IND_1_t = TJB1_TXAMT > 0,
       IND_2_t = TJB2_TXAMT > 0,
       IND_3_t = TJB3_TXAMT > 0,
@@ -77,6 +93,7 @@ build_annual_sipp = function(year, write = F, out = T) {
     filter(TAGE > 17)
   
   data %<>% left_join(
+    # For each individual, split wages and tips between Self Employment and Employed earnings
     1:4 %>%
       map(
         .f = ~ data  %>%
@@ -102,9 +119,8 @@ build_annual_sipp = function(year, write = F, out = T) {
       select(u_ID, MONTHCODE, WAGES_SUM, WAGES_TIP, SELF_SUM, SELF_TIP),
   )
     
-    
+  # Annualize the Monthly Data
   data %>%
-    #filter(t_flag) %>%
     group_by(u_ID) %>%
     reframe(
       year = year,
@@ -129,6 +145,7 @@ build_annual_sipp = function(year, write = F, out = T) {
     left_join(
       1:4 %>%
         map(
+          # For each Industry in which an individual worked for an employer, get it's tips
           .f = ~ data %>%
             filter(!!sym(paste0('EJB',.x,'_CLWRK')) == 0) %>%
             group_by(u_ID, !!sym(paste0('TJB',.x,'_IND'))) %>%
@@ -158,6 +175,7 @@ build_annual_sipp = function(year, write = F, out = T) {
     left_join(
       1:4 %>%
         map(
+          # For each Industry in which an individual was self employed, get it's tips
           .f = ~ data %>%
             filter(!!sym(paste0('EJB',.x,'_CLWRK')) == 1) %>%
             group_by(u_ID, !!sym(paste0('TJB',.x,'_IND'))) %>%
@@ -184,15 +202,74 @@ build_annual_sipp = function(year, write = F, out = T) {
           values_from = c(ind, tips_self)
         )
     ) %>%
+    left_join(
+      1:4 %>%
+        map(
+          # Get annual wages for each job in which an individual worked for an employer
+          .f = ~ data %>%
+            filter(!!sym(paste0('EJB',.x,'_CLWRK')) == 0) %>%
+            group_by(u_ID, !!sym(paste0('TJB',.x,'_OCC'))) %>%
+            reframe(
+              earn = sum(!!sym(paste0('TJB',.x,'_MSUM'))),
+              earn = ifelse(is.na(earn), 0, earn)
+            ) %>%
+            rename(
+              occ = !!sym(paste0('TJB',.x,'_OCC'))
+            )
+        ) %>%
+        bind_rows() %>%
+        group_by(u_ID, occ) %>%
+        reframe(
+          earn_wages = sum(earn)
+        ) %>%
+        filter(!is.na(occ)) %>%
+        group_by(u_ID) %>%
+        mutate(
+          count = 1:n()
+        ) %>%
+        pivot_wider(
+          names_from = count,
+          values_from = c(occ, earn_wages)
+        )
+    ) %>%
+    left_join(
+      1:4 %>%
+        map(
+          # Get annual wages for each job in which an individual was self employed
+          .f = ~ data %>%
+            filter(!!sym(paste0('EJB',.x,'_CLWRK')) == 1) %>%
+            group_by(u_ID, !!sym(paste0('TJB',.x,'_OCC'))) %>%
+            reframe(
+              earn = sum(!!sym(paste0('TJB',.x,'_MSUM'))),
+              earn = ifelse(is.na(earn), 0, earn)
+            ) %>%
+            rename(
+              occ = !!sym(paste0('TJB',.x,'_OCC'))
+            )
+        ) %>%
+        bind_rows() %>%
+        group_by(u_ID, occ) %>%
+        reframe(
+          earn_self = sum(earn)
+        ) %>%
+        filter(!is.na(occ)) %>%
+        group_by(u_ID) %>%
+        mutate(
+          count = 1:n()
+        ) %>%
+        pivot_wider(
+          names_from = count,
+          values_from = c(occ, earn_self)
+        )
+    ) %>%
     return()
 }
 
 
 df_ind = c(2018:2023) %>%
-  map(.f = ~ build_annual_sipp(.x, write = F, out = T)) %>%
+  map(.f = ~ build_annual_sipp(.x)) %>%
   bind_rows()
 
-df_ind %>%
-  write_csv(., '/gpfs/gibbs/project/sarin/shared/raw_data/SIPP/tip_ind_full_split_2.csv')
+
 
 
